@@ -1,10 +1,8 @@
 '''
 Script to monitor links sent to discord channels and opening them in a new browser tab.
-Adapted to monitor links sent by https://partalert.net/join-discord
-
+Generalized version
 by https://github.com/Smidelis
 based on https://github.com/clearyy/discord-link-opener and https://github.com/Vincentt1705/partalert-link-opener
-
 '''
 
 import webbrowser
@@ -51,38 +49,13 @@ def print_time(*content):
     date_time = now.strftime("%d/%m/%Y %H:%M:%S")
     print(f"[{date_time}] - [INFO] ", *content)
 
-# Function to build the amazon url, where partalert is redirecting to
-def get_amazon_url(url):
-    """
-    This function collects and returns an amazon link
-    that would be linked through the green button on the webpage.
-    :param url: An partalert.net link for an amazon product
-    :return: The extracted amazon link to the product
-    """
-    # Split url and filter needed parts
-    asin, price, smid, tag, timestamp, title, tld = url.split("&")
-
-    # For the product id and country search for the last '=' and collect the part after it
-    prod_id, country = (info[info.rfind("=")+1:] for info in (asin, tld))
-
-    # Create full Amazon url
-    url = f"https://www.amazon{country}/dp/{prod_id}?{tag}&linkCode=ogi&th=1&psc=1&{smid}"
-    return url
-
 # Check for keywords and blacklisted words in message urls and open browser if conditions are met
 async def check_urls(urls, channel_name):
     for url in urls:
         if any(x in url.lower() for x in keywords) and all(x not in url.lower() for x in blacklist):
-            # Check if url contains partalert.net. If true, direct amazon link will be built.
-            if "partalert.net" in url:
-                amazon_url = get_amazon_url(url)
-                # Enter path to your browser
-                webbrowser.get("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe %s").open(amazon_url)
-                print_time(f'Link opened from #{channel_name}: {amazon_url}')
-            else: 
-                # Enter path to your browser
-                webbrowser.get("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe %s").open(url)
-                print_time(f'Link opened from #{channel_name}: {url}')
+            # Enter path to your browser
+            webbrowser.get("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe %s").open(url)
+            print_time(f'Link opened from #{channel_name}: {url}')
             if playBellSound:
                 winsound.PlaySound('bell.wav', winsound.SND_FILENAME)
 
@@ -107,17 +80,16 @@ async def on_ready():
 async def on_message(message):
     if message.channel.id in channels:
         await asyncio.sleep(0.3)
+        last_msg = await get_last_msg(message.channel.id)
         try:
-            last_msg = await get_last_msg(message.channel.id)
             fields = last_msg.embeds[0].fields
             linkembed = next(x for x in fields if x.name == "Link")
             urls = re.findall('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*(),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', linkembed.value if linkembed else "")
             for url in urls:
                 await check_urls(urls, message.channel.name)
         except:
-            if message.content != '':
-                urls = re.findall("(?:(?:https?|ftp):\/\/)?[\w/\-?=%.#&+]+\.[\w/\-?=%.#&+]+",message.content)
-                
+            if last_msg.content != '':
+                urls = re.findall("(?:(?:https?|ftp):\/\/)?[\w/\-?=%.#&+]+\.[\w/\-?=%.#&+]+",last_msg.content)
                 if urls:
                     await check_urls(urls, message.channel.name)
 
