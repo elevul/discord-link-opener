@@ -16,6 +16,10 @@ from datetime import datetime
 import urllib.parse as urlparse
 from urllib.parse import parse_qs
 import yaml
+from azure.servicebus import ServiceBusClient, ServiceBusMessage
+from datetime import datetime
+from bs4 import BeautifulSoup
+import requests
 
 #pylint: disable=anomalous-backslash-in-string
 
@@ -35,10 +39,17 @@ browserchoice = cfg['browsers']['user_choice']
 # Pulling keywords from yml config file
 keywords = cfg['filters']['keywords']
 
+#Pulling Service Bus from config file
+CONNECTION_STR = cfg['servicebus']['CONNECTION_STR']
+TOPIC_NAME = cfg['servicebus']['TOPIC_NAME']
+date = datetime.now().strftime("%d_%m_%Y")
+
 # Pulling blacklist from yml file and accounting for it being null
 black = cfg['filters']['blacklist']
 if black == [None]:
     blacklist = ''
+else:
+    blacklist = black
 print(blacklist)
 
 # Pulling channels from yml file
@@ -67,24 +78,22 @@ def print_time(*content):
 
 # Function to build the amazon url, where partalert is redirecting to
 def get_amazon_url(url):
-    """
-    This function collects and returns an amazon link
-    that would be linked through the green button on the webpage.
-    :param url: An partalert.net link for an amazon product
-    :return: The extracted amazon link to the product
-    """
+    r = requests.get(url)
+    soup = BeautifulSoup(r.content, "html.parser")
+    urls = []
+    for a in soup.find_all('a', href=True):
+        if 'partalert.net' not in a['href']:
+            urls.append(a['href'])
+    return urls
 
-    # Parse url to obtain query parameters
-    parsed = urlparse.urlparse(url)
-
-    country = parse_qs(parsed.query)['tld'][0]
-    prod_id = parse_qs(parsed.query)['asin'][0]
-    tag = parse_qs(parsed.query)['tag'][0]
-    smid = parse_qs(parsed.query)['smid'][0]
-
-    # Create full Amazon url
-    url = f"https://www.amazon{country}/dp/{prod_id}?{tag}&linkCode=ogi&th=1&psc=1&{smid}"
-    return url
+def get_bavarnoldurl(url):
+    r = requests.get(url)
+    soup = BeautifulSoup(r.content, "html.parser")
+    urls = []
+    for a in soup.find_all('a', href=True):
+        if 'https://www.awin1.com' in a['href']:
+            urls.append(a['href'])
+    return urls
 
 # Check for keywords and blacklisted words in message urls and open browser if conditions are met
 async def check_urls(urls, channel_name):
@@ -92,10 +101,15 @@ async def check_urls(urls, channel_name):
         if any(x in url.lower() for x in keywords) and all(x not in url.lower() for x in blacklist):
             # Check if url contains partalert.net. If true, direct amazon link will be built.
             if "partalert.net" in url:
-                amazon_url = get_amazon_url(url)
-                # Enter path to your browser
-                webbrowser.get(browserchoice).open_new_tab(amazon_url)
-                print_time(f'Link opened from #{channel_name}: {amazon_url}')
+                amazon_urls = get_amazon_url(url)
+                for amazon_url in amazon_urls:
+                    webbrowser.open_new_tab(amazon_url)
+                    print_time(f'Link opened from #{channel_name}: {amazon_url}')
+            elif "cutt.ly" in url:
+                bavarnold_urls = get_bavarnoldurl(url)
+                for bavarnold_url in bavarnold_urls:
+                    webbrowser.open_new_tab(bavarnold_url)
+                    print_time(f'Link opened from #{channel_name}: {bavarnold_url}')
             else: 
                 # Enter path to your browser
                 webbrowser.get(browserchoice).open_new_tab(url)
@@ -106,6 +120,16 @@ async def check_urls(urls, channel_name):
 async def get_last_msg(channelid):
     msg = await client.get_channel(channelid).history(limit=1).flatten()
     return msg[0]
+
+async def send_single_message(message):
+    servicebus_client = ServiceBusClient.from_connection_string(conn_str=CONNECTION_STR, logging_enable=True)
+    with servicebus_client:
+        # get a Queue Sender object to send messages to the queue
+        sender = servicebus_client.get_topic_sender(topic_name=TOPIC_NAME)
+        with sender:
+            # send one message
+            sender.send_messages(message)
+    print_time("Sent a single message")
 
 @client.event
 async def on_ready():
@@ -124,17 +148,22 @@ async def on_ready():
 async def on_message(message):
     if message.channel.id in channels:
         await asyncio.sleep(0.3)
+        last_msg = await get_last_msg(message.channel.id)
+        urls = re.findall('(http[s]?:\/\/(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*(),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+)', last_msg.content)
+        ldlcidentifiers = re.findall('http[s]?:\/\/www\.ldlc\.com.*(PB\d*.html)', last_msg.content)
+        print(str(ldlcidentifiers))
         try:
-            last_msg = await get_last_msg(message.channel.id)
-            fields = last_msg.embeds[0].fields
-            linkembed = next(x for x in fields if x.name == "Link")
-            urls = re.findall('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*(),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', linkembed.value if linkembed else "")
-            for url in urls:
-                await check_urls(urls, message.channel.name)
+            if ldlcidentifiers:
+                url = 'https://www.ldlc.com/fiche/' + ldlcidentifiers[0]
+                cardfull = re.findall('NVIDIA RTX (.* [Tt]?[Ii]?)\(?\w*\)?',last_msg.content)[0]
+                cardname = re.sub('\s+','',cardfull).lower()
+                print_time('Sending ' + cardname + ' - ' + url)
+                messageservicebus = ServiceBusMessage(
+                    url,
+                    message_id=cardname
+                )
+                asyncio.ensure_future(send_single_message(messageservicebus))
         except:
-            if message.content != '':
-                urls = re.findall("(?:(?:https?|ftp):\/\/)?[\w/\-?=%.#&+]+\.[\w/\-?=%.#&+]+",message.content)
-                
-                if urls:
-                    asyncio.ensure_future(check_urls(urls, message.channel.name))
+            print('Message is malformed. Ignoring for the purpose of sending a message to the queue')
+        asyncio.ensure_future(check_urls(urls, message.channel.name))
 client.run(token,bot=False)
